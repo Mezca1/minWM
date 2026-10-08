@@ -142,6 +142,15 @@ class ModelAdapter(ABC):
             negative_prompt (str): the negative-prompt text for the CFG uncond branch.
         """
 
+    def offload_before_decode(self) -> None:
+        """Release optional conditioning models before a memory-heavy VAE decode.
+
+        Most adapters have no auxiliary model to release. Text-conditioned
+        adapters can override this hook while keeping the generation loop
+        family-agnostic.
+        """
+
+
     def decode_latents(self, vae: Any, latents: Tensor) -> Tensor:
         """Decode ``[B,F,C,H,W]`` latents to ``[B,F,3,H,W]`` pixels.
 

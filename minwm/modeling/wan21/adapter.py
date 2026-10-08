@@ -52,6 +52,12 @@ class Wan21Adapter(ModelAdapter):
         """Store the CFG negative-prompt text for :meth:`null_conditioning`."""
         self.negative_prompt = negative_prompt
 
+    def offload_before_decode(self) -> None:
+        """Move the T5 encoder to CPU; VAE decoding does not need text features."""
+        if self.text_encoder is not None:
+            self.text_encoder.to("cpu")
+            self._text_encoder_device = None
+
     def null_conditioning(
         self, batch: dict, batch_size: int, device: torch.device
     ) -> dict[str, Any]:

@@ -21,6 +21,9 @@ Usage:
         --video_dir  /path/to/videos \
         --output_dir /path/to/output_lmdb \
         --vae_path   wan_models/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth
+
+For data-only bring-up, ``--device cpu`` is also supported with a single
+process. The training pipeline still consumes the same LMDB format.
 """
 
 import argparse
@@ -222,11 +225,13 @@ def parse_args():
     p.add_argument("--vae_path", default="wan_models/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth")
     p.add_argument("--target_h", type=int, default=480)
     p.add_argument("--target_w", type=int, default=832)
+    p.add_argument("--device", default="cuda", help="Encoding device; use cpu for single-process data preparation")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    requested_device = torch.device(args.device)
 
     # Distributed setup
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -235,12 +240,16 @@ def main():
         import datetime
         import torch.distributed as dist
 
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", timeout=datetime.timedelta(hours=4))
+        if requested_device.type == "cuda":
+            torch.cuda.set_device(local_rank)
+            backend = "nccl"
+        else:
+            backend = "gloo"
+        dist.init_process_group(backend=backend, timeout=datetime.timedelta(hours=4))
         global_rank = dist.get_rank()
     else:
         global_rank = 0
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"cuda:{local_rank}" if requested_device.type == "cuda" else requested_device)
 
     # Load input JSON
     with open(args.input_json) as f:
@@ -271,7 +280,8 @@ def main():
         shard = valid_list[global_rank * per_gpu : (global_rank + 1) * per_gpu]
     else:
         shard = valid_list
-    print(f"GPU{local_rank}: {len(shard)} samples to encode")
+    rank_label = f"GPU{local_rank}" if device.type == "cuda" else f"CPU rank {global_rank}"
+    print(f"{rank_label}: {len(shard)} samples to encode")
 
     # Init VAE
     vae = Wan21VAE(args.vae_path, device)
@@ -288,7 +298,7 @@ def main():
     first_shape = None
     t0 = time.time()
 
-    pbar = tqdm(shard, desc=f"GPU{local_rank}", disable=(global_rank != 0), dynamic_ncols=True)
+    pbar = tqdm(shard, desc=rank_label, disable=(global_rank != 0), dynamic_ncols=True)
     for idx, item in enumerate(pbar):
         video_tensor = None
         pixel = None
@@ -310,7 +320,8 @@ def main():
             continue
         finally:
             del video_tensor, pixel
-            torch.cuda.empty_cache()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
 
         # Stream write to per-rank LMDB
         with rank_env.begin(write=True) as txn:
@@ -343,7 +354,7 @@ def main():
             txn.put(b"__poses_shape__", " ".join(map(str, first_shape[2])).encode())
     rank_env.sync()
     rank_env.close()
-    print(f"GPU{local_rank}: {count} OK, {errors} errors, " f"{time.time() - t0:.0f}s elapsed")
+    print(f"{rank_label}: {count} OK, {errors} errors, " f"{time.time() - t0:.0f}s elapsed")
 
     # ---- Phase 2: Rank 0 merges per-rank LMDBs (streaming, constant mem) ----
     if world_size > 1:

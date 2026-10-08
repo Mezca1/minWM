@@ -47,12 +47,14 @@ class BidirectionalGenerationLoop:
         sampler: UniPCSolver,
         adapter,
         guidance_scale: float = 1.0,
+        offload_before_decode: bool = False,
     ) -> None:
         self.generator = generator
         self.vae = vae
         self.sampler = sampler
         self.adapter = adapter
         self.guidance_scale = guidance_scale
+        self.offload_before_decode = offload_before_decode
 
     @classmethod
     def from_config(
@@ -82,6 +84,7 @@ class BidirectionalGenerationLoop:
             sampler=sampler,
             adapter=adapter,
             guidance_scale=gen.get("guidance_scale", 1.0),
+            offload_before_decode=gen.get("offload_before_decode", False),
         )
 
     @torch.no_grad()
@@ -131,7 +134,14 @@ class BidirectionalGenerationLoop:
 
         out: dict = {"latents": latents}
         if self.vae is not None:
+            offload = self.offload_before_decode and device.type == "cuda"
+            if offload:
+                self.generator.to("cpu")
+                self.adapter.offload_before_decode()
+                torch.cuda.empty_cache()
             video = self.adapter.decode_latents(self.vae, latents)
+            if offload:
+                self.generator.to(device)
             out["video"] = (video * 0.5 + 0.5).clamp(0, 1)
         return out
 
@@ -392,6 +402,7 @@ class ARGenerationLoop:
             offload = self.offload_before_decode and device.type == "cuda"
             if offload:
                 self.generator.to("cpu")
+                self.adapter.offload_before_decode()
                 torch.cuda.empty_cache()
             video = self.adapter.decode_latents(self.vae, output)
             if offload:
